@@ -1,0 +1,386 @@
+###Part 1: citire, normalizare, boxplots
+
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install(version = "3.13")
+
+BiocManager::install("affy")
+BiocManager::install("GEOquery")
+
+library(GEOquery)
+library(affy)
+
+memory.size() # Checking your memory size
+memory.limit() ## Checking the set limit
+memory.limit(size=56000) ### expanding your memory 
+
+setwd('C:\\Users\\Irina-Oana\\Downloads\\GSE48391_RAW\\cancer')
+#setwd('C:\\Users\\Public\\GSE48391_RAW\\breast cancer')
+
+cels = list.files(pattern = "CEL")
+raw.data=ReadAffy(verbose=TRUE, filenames=cels) 
+
+boxplot(raw.data)
+#cu valori de intensitate nenormalizate
+hist (raw.data) 
+#histograma densitate vs log intensitate pentru datele nenormalizate
+
+BiocManager::install("affyPLM")
+library(affyPLM)
+pset<-fitPLM(raw.data)
+RLE(pset, main='RLE')
+NUSE(pset, main='NUSE')
+
+nvals <- rma(raw.data)
+ned <- exprs(nvals)
+                 
+rma=format(ned, digits=4)
+probes=row.names(ned)
+rma=cbind(probes,rma)
+write.table(rma, file = "rma", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+
+boxplot(ned) 
+#boxplot cu valori de intensitate normalizate
+
+hist(ned)
+#histogram densitate vs intensitate log pentru datele normalizate
+
+data <- t(scale(ned))
+data.pca <- prcomp(data, center=FALSE)
+pdf('pca_dupa_normalizare.pdf')
+plot(data.pca$rotation[,1] ,data.pca$rotation[,2], xlab="PC 1", ylab="PC 2", main="PCA_by_sample") 
+dev.off()
+
+#examine the plot for outliers
+
+
+###Part 2:reducere dim gene
+
+# Expressed in at least 5% of samples (>5%)
+ (i.e. for each gene, the 5th decile of the gene-expression values must be > log2(15))
+#mediana > log2(15)  // https://www.statology.org/percentiles-in-r/
+#remove genes with more than 5% of samples below the 5th percentile
+
+ned.filter <- ned[rowSums(ned > log2(15)) > 5/100 * ncol(ned), ]
+
+# Have a variance significantly different from the median variance of  all probe sets using a threshold of p<0.01  --chitest
+#The p-value of chitest < alpha significance level to reject hypothesis (p-val approach)
+#selectate genele cu o varianta mai mare pt ca au sansa sa caracterizeze un fenotip care se diferentiaza de restul populatiei
+#1% sanse ca rezultatele sa fie aleatorii
+#Un p mic respinge ipoteza nula si este o dovada puternica ca ipoteza nula este invalida.
+#statistica testului se încadreaza în coada superioara a distributiei chi-patrat 
+
+
+ned.filter.var <- apply(ned.filter, 1, var) 
+# compute variance for each gene/st dev la patrat
+
+ned.filter.var.median <- median(ned.filter.var) 
+# find median variance/var
+
+alpha = 0.01 
+# significance level
+
+degf = ncol(ned.filter) - 1 
+# degree of freedom
+
+chi.test.stat = degf * ned.filter.var / ned.filter.var.median 
+# t-statistic for chi-square test (t)
+
+chi.test = chi.test.stat > qchisq(1 - alpha, degf) #112.32
+# actual test
+#qchisq(1 - alpha, degf) #112.32 (t0)
+#Gaseste percentila 99 a distribu?iei Chi-patrat cu degf grade de libertate.
+
+ned.filter <- ned.filter[chi.test, ]
+# filter genes
+
+
+tree <- hclust(dist(t(ned.filter)))
+#grupare ierarhica a probelor/pacientilor, nu a genelor
+#grupam pacienti pe baza unui set de gene pt a vedea daca sunt subgrupuri de pacienti cu profiluri diferite (markeri moleculari diferiti)
+
+clusters <- cutree(tree, k=3)
+#impartirea in 3 grupuri, fiecare dintre cele 81 probe fiind impartite in clusterul 1, 2 sau 3
+pdf('exprssion_clusters_heatmap.pdf')
+plot(tree)
+#taiat dendograma in clustere
+dev.off()
+#harta de probe grupate
+
+cl = 1
+cluster.test <- function(x) {return(t.test(x[clusters == cl], x[clusters  != cl])$p.value)}
+genes.cluster.test.diff <- apply(ned.filter, 1, cluster.test)
+#Welch t-test-gene exprimate dif intre un cluster dat si restul de clustere
+ 
+#gene exprimate diferential
+probes1=rownames(ned.filter)[genes.cluster.test.diff < 0.05]
+ned1.filter <- ned.filter[probes1, ]
+nrow(ned1.filter)  # number of differentially expressed
+#nr gene exprimate dif cu p_val<0.05  --7189 genes x 81 samples
+
+rma=format(ned1.filter, digits=4)
+rma1=cbind(probes1,rma)
+
+write.table(rma1, file = "gene_expr_diferential", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+#pe alea diferentiate
+
+
+boxplot(ned.filter) 
+
+data <- t(scale(ned.filter))
+data.pca <- prcomp(data, center=FALSE)
+pdf('pca_gene_expr_dif.pdf')
+plot(data.pca$rotation[,1] ,data.pca$rotation[,2], xlab="PC 1", ylab="PC 2", main="PCA_by_sample") 
+dev.off()
+#PCA gene expr dif
+
+
+#pentru adnotare
+abcd <- read.table("gene_expr_diferential", header=T)
+dim(abcd)
+
+abcd[is.na(abcd)] <- 0
+write.table(abcd, file = "abcd_fara na.txt", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+#replace na cu 0
+
+s=aggregate(abcd[,2:81], by=abcd[1], sum)
+dim(s)
+write.table(s, file = "abcd_fara na si duplicate.txt", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+
+
+###Part 3:  annotating to Entrez Gene ID and Symbol
+
+BiocManager::install  ("hgu133plus2.db")
+BiocManager::install("AnnotationDbi.db")
+BiocManager::install ("annotate")
+
+library ("AnnotationDbi")
+library ("annotate")
+library ("hgu133plus2.db")
+
+ned <- read.table ("abcd_fara na si duplicate.txt", header = T, row.names = 1)
+dim(ned)
+ncol(ned)
+nrow (ned)
+
+probes=row.names(ned)
+Symbols = unlist(mget(probes, hgu133plus2SYMBOL, ifnotfound=NA))
+Entrez_IDs = unlist(mget(probes, hgu133plus2ENTREZID, ifnotfound=NA))
+
+#Combinare adnotari genetice cu date brute
+rma=format(ned, digits=4)
+rma=cbind(probes,Symbols,Entrez_IDs,rma)
+
+#Write RMA-normalized, mapped data to file
+write.table(rma, file = "adnotation.txt", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+
+
+###Part 4: WGCNA part
+#https://rpubs.com/Amayrani/WGCNAPart1
+#http://pklab.med.harvard.edu/scw2014/WGCNA.html
+#http://pages.stat.wisc.edu/~yandell/statgen/ucla/WGCNA/wgcna.html
+#https://horvath.genetics.ucla.edu/html/CoexpressionNetwork/Rpackages/WGCNA/Tutorials/FemaleLiver-02-networkConstr-man.pdf
+
+
+BiocManager::install("dynamicTreeCut")
+ 
+BiocManager::install("WGCNA")
+library(WGCNA)
+
+ned <- read.table("abcd_fara na si duplicate.txt", header=T,row.names=1)
+
+datExpr=t(ned)
+gene=colnames(datExpr)
+#gene.names=gene
+
+powers = c(1:10)
+sft = pickSoftThreshold(datExpr, powerVector = powers)
+# Plot the results
+sizeGrWindow(9, 5)
+par(mfrow = c(1,2));
+
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+xlab="Soft Threshold (power)",ylab="Scale Free Topology Model Fit, signed R^2",
+type="n", main = paste("Scale independence"));
+text(sft$fitIndices[,1], -sign(sft$fitIndices[,3])*sft$fitIndices[,2],labels=powers,
+col="red");
+
+# Red line corresponds to using an R^2 cut-off
+abline(h=0.8,col="red")
+
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",main = paste("Mean connectivity"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers,col="red")
+
+softPower = 9;
+adjacency = adjacency(datExpr, power = softPower);
+
+#write.table(adjacency, file = "adjacency", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+#dim(adjacency)
+#[1] 7189 7189
+
+# Turn adjacency into topological overlap
+TOM = TOMsimilarity(adjacency);
+dissTOM = 1-TOM
+
+#write.table(dissTOM, file = "dissTOM", quote = FALSE, sep = "\t", row.names = FALSE,col.names = TRUE)
+#dim(dissTOM)
+#[1] 7189 7189
+
+# Call the hierarchical clustering function
+geneTree = hclust(as.dist(dissTOM), method = "average");
+
+minModuleSize = 100;
+dynamicMods = cutreeDynamic(dendro = geneTree,  method="tree", minClusterSize = minModuleSize);
+table(dynamicMods)
+#12 dynamic modules
+dynamicColors = labels2colors(dynamicMods)
+table(dynamicColors)
+
+restGenes= (dynamicColors != "grey")
+diss1=1-TOMsimilarityFromExpr(datExpr[,restGenes], power = softPower)
+write.table(diss1, file = "TOM_fara modul grey_3663", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+dim(diss1)
+[1] 3663 3663
+
+#black    
+restGenes= (dynamicColors == "black")
+diss1=1-TOMsimilarityFromExpr(datExpr[,restGenes], power = softPower)
+write.table(diss1, file = "TOM_black_174", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+
+    
+#blue   
+restGenes= (dynamicColors == "blue")
+diss1=1-TOMsimilarityFromExpr(datExpr[,restGenes], power = softPower)
+write.table(diss1, file = "TOM_blue", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+    
+#brown       
+restGenes= (dynamicColors == "brown")
+diss1=1-TOMsimilarityFromExpr(datExpr[,restGenes], power = softPower)
+write.table(diss1, file = "TOM_brown", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+    
+
+#green 
+restGenes= (dynamicColors == "green")
+diss1=1-TOMsimilarityFromExpr(datExpr[,restGenes], power = softPower)
+write.table(diss1, file = "green", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+    
+#greenyellow
+restGenes= (dynamicColors == "greenyellow")
+diss1=1-TOMsimilarityFromExpr(datExpr[,restGenes], power = softPower)
+write.table(diss1, file = "greenyellow", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+            
+#grey    
+restGenes= (dynamicColors == "grey")
+diss1=1-TOMsimilarityFromExpr(datExpr[,restGenes], power = softPower)
+write.table(diss1, file = "grey", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+   
+#magenta   
+restGenes= (dynamicColors == "magenta")
+diss1=1-TOMsimilarityFromExpr(datExpr[,restGenes], power = softPower)
+write.table(diss1, file = "magenta", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+        
+#pink    
+restGenes= (dynamicColors == "pink")
+diss1=1-TOMsimilarityFromExpr(datExpr[,restGenes], power = softPower)
+write.table(diss1, file = "pink", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+   
+#purple    
+restGenes= (dynamicColors == "purple")
+diss1=1-TOMsimilarityFromExpr(datExpr[,restGenes], power = softPower)
+write.table(diss1, file = "purple", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+       
+#red 
+restGenes= (dynamicColors == "red")
+diss1=1-TOMsimilarityFromExpr(datExpr[,restGenes], power = softPower)
+write.table(diss1, file = "red", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+
+#tan 
+restGenes= (dynamicColors == "tan")
+diss1=1-TOMsimilarityFromExpr(datExpr[,restGenes], power = softPower)
+write.table(diss1, file = "tan", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+
+#turquoise    
+restGenes= (dynamicColors == "turquoise")
+diss1=1-TOMsimilarityFromExpr(datExpr[,restGenes], power = softPower)
+write.table(diss1, file = "turquoise", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+  
+#yellow     
+restGenes= (dynamicColors == "yellow")
+diss1=1-TOMsimilarityFromExpr(datExpr[,restGenes], power = softPower)
+write.table(diss1, file = "yellow", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+
+restGenes= (dynamicColors != "grey")
+diss1=1-TOMsimilarityFromExpr(datExpr[,restGenes], power = softPower)
+colnames(diss1) =rownames(diss1) =gene[restGenes]
+hier1=hclust(as.dist(diss1), method="average" )
+plotDendroAndColors(hier1, dynamicColors[restGenes], "Dynamic Tree Cut", dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05, main = "Gene dendrogram and module colors")
+
+module_colors= setdiff(unique(dynamicColors), "grey")
+for (color in module_colors){
+    module=gene[which(dynamicColors==color)]
+    write.table(module, paste("module_",color, ".txt",sep=""), sep="\t", row.names=FALSE, col.names=FALSE,quote=FALSE)
+}
+
+for (color in "grey"){
+    module=gene[which(dynamicColors==color)]
+    write.table(module, paste("module_",color, ".txt",sep=""), sep="\t", row.names=FALSE, col.names=FALSE,quote=FALSE)
+}
+
+#Quantify module similarity by eigengene correlation
+MEList = moduleEigengenes(datExpr, colors = dynamicColors)
+MEs = MEList$eigengenes
+#1st PCA of modules in datExpr
+plotEigengeneNetworks(MEs, "", marDendro = c(0,4,1,2), marHeatmap = c(3,4,1,2))
+
+sizeGrWindow(12, 9)
+#pdf(file = "Plot compa.pdf", wi = 9, he = 6)
+plotDendroAndColors(geneTree, cbind(dynamicColors, mergedColors),
+c("Dynamic Tree Cut", "Merged dynamic"),
+dendroLabels = FALSE, hang = 0.03,
+addGuide = TRUE, guideHang = 0.05)
+#dev.off()
+
+###Part 5: Hub genes (30 din fiecare modul)
+
+# Adnotare si sum pe coloane pt a gasi hub genes
+ned <- read.table("yellow_419", header=T)
+ned2<-apply(ned, FUN=sum,MARGIN=2)
+ned <- read.table("Adnotare modul yellow.txt", header=T,row.names=1)
+a<-cbind(ned, ned2)
+write.table(a, file = "adnotare si sum modul yellow", quote = FALSE, sep = "\t", row.names
+ = TRUE, col.names = TRUE)
+
+#gasire top genes
+ned <- read.table("adnotare si sum modul yellow", header=T,row.names=1)
+ned1<-head(arrange(ned, desc(Val)), n = 30)
+write.table(ned1, file = "top 30 yellow", quote = FALSE, sep = "\t", row.names = TRUE, col.names = TRUE)
+#all colours
+
+#Creare matrice de adiacenta pt cele 30 gene din fiecare modul
+#dupa ce am rearanjat matricile de adiacenta (pus gene si pe coloane)
+
+ned <- read.table("yellow_419 - Copy", header=T,row.names=1)
+ned1<-ned[(rownames(ned) %in% c('238430_x_at', '230895_at', '203634_s_at', '211208_s_at', '242787_at', '205091_x_at', '212546_s_at', '228181_at', '230205_at', '208811_s_at', '201089_at', '242617_at', '212420_at', '244052_at', '218465_at', '224712_x_at', '219631_at', '202164_s_at', '212794_s_at', '226231_at', '210653_s_at', '206331_at', '243999_at', '37170_at', '242247_at', '204222_s_at', '211085_s_at', '214315_x_at', '201823_s_at', '230352_at')), (colnames(ned) %in% c('X238430_x_at', 'X230895_at', 'X203634_s_at', 'X211208_s_at', 'X242787_at', 'X205091_x_at', 'X212546_s_at', 'X228181_at', 'X230205_at', 'X208811_s_at', 'X201089_at', 'X242617_at', 'X212420_at', 'X244052_at', 'X218465_at', 'X224712_x_at', 'X219631_at', 'X202164_s_at', 'X212794_s_at', 'X226231_at', 'X210653_s_at', 'X206331_at', 'X243999_at', 'X37170_at', 'X242247_at', 'X204222_s_at', 'X211085_s_at', 'X214315_x_at', 'X201823_s_at', 'X230352_at238430_x_at', 'X230895_at', 'X203634_s_at', 'X211208_s_at', 'X242787_at', 'X205091_x_at', 'X212546_s_at', 'X228181_at', 'X230205_at', 'X208811_s_at', 'X201089_at', 'X242617_at', 'X212420_at', 'X244052_at', 'X218465_at', 'X224712_x_at', 'X219631_at', 'X202164_s_at', 'X212794_s_at', 'X226231_at', 'X210653_s_at', 'X206331_at', 'X243999_at', 'X37170_at', 'X242247_at', 'X204222_s_at', 'X211085_s_at', 'X214315_x_at', 'X201823_s_at', 'X230352_at'))]
+write.table(ned1, file = "adjacency_30_yellow", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+   
+   
+###Part 6: Igraph
+#relatii dintre gene   
+   
+BiocManager::install("igraph")
+library(igraph)
+
+ned <- read.table("adjacency_30_red - Copy", header=T,row.names=1)
+ned1<-data.matrix(ned)
+g  <- graph.adjacency(ned1,weighted=TRUE)
+df <- get.data.frame(g)
+write.table(df, file = "graf_yellow", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+#g<-graph.data.frame(df, directed=FALSE)
+#plot(g)
+
+#am sortat graf_culoare in ordine desc weight si apoi am selectat primele 30 corelatii din fiecare modul pt plot
+ned<-as.data.frame(read.table("yellow.txt"))
+g<-graph.data.frame(ned, directed=FALSE)
+plot(g)   
